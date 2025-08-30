@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import * as d3 from "d3";
 import type { RootState } from "../../store";
@@ -8,6 +8,8 @@ interface Point {
   id: string;
   x: number;
   y: number;
+  offsetX?: number;
+  offsetY?: number;
 }
 
 export default function PointsGraph() {
@@ -30,6 +32,15 @@ export default function PointsGraph() {
 
   // Chart margins
   const margin = { top: 50, right: 30, bottom: 60, left: 60 };
+
+  // Debounced add point function to prevent rapid re-renders
+  const addPointDebounced = useMemo(() => {
+    let timeoutId: NodeJS.Timeout;
+    return (point: Point) => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => dispatch(addPoint(point)), 50);
+    };
+  }, [dispatch]);
 
   // Resize observer to handle container size changes
   useEffect(() => {
@@ -85,513 +96,530 @@ export default function PointsGraph() {
   }, [points]);
 
   const createChart = useCallback(() => {
-    if (!svgRef.current || width <= 0 || height <= 0) return;
+    try {
+      if (!svgRef.current || width <= 0 || height <= 0) return;
 
-    // Clear previous chart
-    d3.select(svgRef.current).selectAll("*").remove();
+      // Clear previous chart
+      d3.select(svgRef.current).selectAll("*").remove();
 
-    // Create main SVG with full dimensions
-    const svg = d3
-      .select(svgRef.current)
-      .attr("width", dimensions.width)
-      .attr("height", dimensions.height)
-      .style("cursor", isDragging ? "grabbing" : "default"); // Global cursor control
+      // Create main SVG with full dimensions
+      const svg = d3
+        .select(svgRef.current)
+        .attr("width", dimensions.width)
+        .attr("height", dimensions.height);
 
-    // Create chart group
-    const chartGroup = svg
-      .append("g")
-      .attr("transform", `translate(${margin.left},${margin.top})`);
+      // Create chart group
+      const chartGroup = svg
+        .append("g")
+        .attr("class", "chart-group")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
 
-    // Get smart domains
-    const domains = getSmartDomain();
+      // Get smart domains
+      const domains = getSmartDomain();
 
-    // Create base scales
-    const baseXScale = d3.scaleLinear().domain(domains.x).range([0, width]);
+      // Create base scales
+      const baseXScale = d3.scaleLinear().domain(domains.x).range([0, width]);
+      const baseYScale = d3.scaleLinear().domain(domains.y).range([height, 0]);
 
-    const baseYScale = d3.scaleLinear().domain(domains.y).range([height, 0]);
+      // Apply current transform to get actual scales
+      const xScale = currentTransform.rescaleX(baseXScale);
+      const yScale = currentTransform.rescaleY(baseYScale);
 
-    // Apply current transform to get actual scales
-    const xScale = currentTransform.rescaleX(baseXScale);
-    const yScale = currentTransform.rescaleY(baseYScale);
+      // Create custom tick values (0, 2, 4, 6, 8...)
+      const createCustomTicks = (domain: [number, number]): number[] => {
+        const [min, max] = domain;
+        const ticks: number[] = [];
+        const start = Math.floor(min / 2) * 2;
+        const step = Math.max(1, Math.ceil((max - min) / 20));
+        const actualStep = step % 2 === 0 ? step : step + 1;
 
-    // Create custom tick values (0, 2, 4, 6, 8...)
-    const createCustomTicks = (domain: [number, number]): number[] => {
-      const [min, max] = domain;
-      const ticks: number[] = [];
-      const start = Math.floor(min / 2) * 2;
-      const step = Math.max(1, Math.ceil((max - min) / 20));
-      const actualStep = step % 2 === 0 ? step : step + 1;
-
-      for (let i = start; i <= max; i += actualStep) {
-        ticks.push(i);
-      }
-      return ticks;
-    };
-
-    // Create axes with custom ticks
-    const xAxis = d3
-      .axisBottom(xScale)
-      .tickValues(createCustomTicks(xScale.domain() as [number, number]))
-      .tickFormat(d3.format("d"));
-
-    const yAxis = d3
-      .axisLeft(yScale)
-      .tickValues(createCustomTicks(yScale.domain() as [number, number]))
-      .tickFormat(d3.format("d"));
-
-    // Add grid lines
-    chartGroup
-      .append("g")
-      .attr("class", "grid x-grid")
-      .attr("transform", `translate(0,${height})`)
-      .call(
-        d3
-          .axisBottom(xScale)
-          .tickValues(createCustomTicks(xScale.domain() as [number, number]))
-          .tickSize(-height)
-          .tickFormat(() => "")
-      )
-      .style("stroke-dasharray", "3,3")
-      .style("opacity", 0.3);
-
-    chartGroup
-      .append("g")
-      .attr("class", "grid y-grid")
-      .call(
-        d3
-          .axisLeft(yScale)
-          .tickValues(createCustomTicks(yScale.domain() as [number, number]))
-          .tickSize(-width)
-          .tickFormat(() => "")
-      )
-      .style("stroke-dasharray", "3,3")
-      .style("opacity", 0.3);
-
-    // Add axes
-    chartGroup
-      .append("g")
-      .attr("class", "x-axis")
-      .attr("transform", `translate(0,${height})`)
-      .call(xAxis);
-
-    chartGroup.append("g").attr("class", "y-axis").call(yAxis);
-
-    // Add clickable background for adding points
-    const background = chartGroup
-      .append("rect")
-      .attr("width", width)
-      .attr("height", height)
-      .attr("fill", "transparent")
-      .style("cursor", isDragging ? "grabbing" : "crosshair");
-
-    // Enhanced zoom behavior
-    const zoom = d3
-      .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.1, 50])
-      .filter((event) => {
-        // Disable zoom during point dragging
-        return !isDragging;
-      })
-      .on("zoom", (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
-        const { transform } = event;
-
-        // Store the current transform
-        setCurrentTransform(transform);
-
-        // Update scales with new transform
-        const newXScale = transform.rescaleX(baseXScale);
-        const newYScale = transform.rescaleY(baseYScale);
-
-        // Update axes
-        chartGroup.select<SVGGElement>(".x-axis").call(
-          d3
-            .axisBottom(newXScale)
-            .tickValues(
-              createCustomTicks(newXScale.domain() as [number, number])
-            )
-            .tickFormat(d3.format("d"))
-        );
-
-        chartGroup.select<SVGGElement>(".y-axis").call(
-          d3
-            .axisLeft(newYScale)
-            .tickValues(
-              createCustomTicks(newYScale.domain() as [number, number])
-            )
-            .tickFormat(d3.format("d"))
-        );
-
-        // Update grid
-        chartGroup.select<SVGGElement>(".x-grid").call(
-          d3
-            .axisBottom(newXScale)
-            .tickValues(
-              createCustomTicks(newXScale.domain() as [number, number])
-            )
-            .tickSize(-height)
-            .tickFormat(() => "")
-        );
-
-        chartGroup.select<SVGGElement>(".y-grid").call(
-          d3
-            .axisLeft(newYScale)
-            .tickValues(
-              createCustomTicks(newYScale.domain() as [number, number])
-            )
-            .tickSize(-width)
-            .tickFormat(() => "")
-        );
-
-        // Update points (only if not dragging)
-        if (!isDragging) {
-          chartGroup
-            .selectAll<SVGCircleElement, Point>(".point")
-            .attr("cx", (d: Point) => newXScale(d.x))
-            .attr("cy", (d: Point) => newYScale(d.y));
+        for (let i = start; i <= max; i += actualStep) {
+          ticks.push(i);
         }
-      });
-
-    // Apply zoom to SVG with current transform
-    svg.call(zoom).call(zoom.transform, currentTransform);
-
-    // Handle background clicks to add points
-    background.on("click", function (event: MouseEvent) {
-      if (event.defaultPrevented || isDragging) return; // Ignore drag
-
-      const [mouseX, mouseY] = d3.pointer(event, this);
-
-      const x = Math.round(xScale.invert(mouseX));
-      const y = Math.round(yScale.invert(mouseY));
-
-      const newId = `point-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      dispatch(addPoint({ x, y, id: newId }));
-    });
-
-    // Enhanced drag behavior with persistent cursor and hover
-    const drag = d3
-      .drag<SVGCircleElement, Point>()
-      .on(
-        "start",
-        function (
-          event: d3.D3DragEvent<SVGCircleElement, Point, Point>,
-          d: Point
-        ) {
-          event.sourceEvent.stopPropagation(); // Prevent zoom/pan
-          setIsDragging(true);
-          setDraggedPointId(d.id);
-
-          // Visual feedback for drag start
-          d3.select(this)
-            .raise() // Bring to front
-            .attr("r", 10) // Enlarge during drag
-            .attr("stroke-width", 3)
-            .attr("fill", "#ff6b6b") // Change color during drag
-            .style("filter", "drop-shadow(0 4px 8px rgba(0,0,0,0.3))") // Add shadow
-            .style("cursor", "grabbing !important"); // Force cursor
-
-          // Set global cursor on SVG and body to ensure it persists
-          svg.style("cursor", "grabbing !important");
-          d3.select("body").style("cursor", "grabbing !important");
-
-          // Initialize drag coordinates
-          const startX = Math.round(xScale.invert(event.x));
-          const startY = Math.round(yScale.invert(event.y));
-          setCurrentDragCoords({ x: startX, y: startY });
-        }
-      )
-      .on(
-        "drag",
-        function (
-          event: d3.D3DragEvent<SVGCircleElement, Point, Point>,
-          d: Point
-        ) {
-          // Get current mouse position in chart coordinates
-          const [mouseX, mouseY] = [event.x, event.y];
-
-          // Constrain to chart bounds
-          const constrainedX = Math.max(0, Math.min(width, mouseX));
-          const constrainedY = Math.max(0, Math.min(height, mouseY));
-
-          // Update visual position immediately for smooth dragging
-          d3.select(this)
-            .attr("cx", constrainedX)
-            .attr("cy", constrainedY)
-            .style("cursor", "grabbing !important"); // Maintain cursor
-
-          // Calculate data coordinates
-          const newX = Math.round(xScale.invert(constrainedX));
-          const newY = Math.round(yScale.invert(constrainedY));
-
-          // Update current drag coordinates for tooltip
-          setCurrentDragCoords({ x: newX, y: newY });
-
-          // Update Redux store (throttled for performance)
-          dispatch(updatePoint({ id: d.id, x: newX, y: newY }));
-        }
-      )
-      .on(
-        "end",
-        function (
-          event: d3.D3DragEvent<SVGCircleElement, Point, Point>,
-          d: Point
-        ) {
-          setIsDragging(false);
-          setDraggedPointId(null);
-          setCurrentDragCoords(null);
-
-          // Reset visual feedback
-          d3.select(this)
-            .attr("r", d.id === hoveredId ? 8 : 6) // Reset size
-            .attr("stroke-width", 2)
-            .attr("fill", d.id === hoveredId ? "#4ecdc4" : "#8884d8") // Reset color
-            .style("filter", null) // Remove shadow
-            .style("cursor", "grab"); // Reset cursor
-
-          // Reset global cursors
-          svg.style("cursor", "default");
-          d3.select("body").style("cursor", "default");
-          background.style("cursor", "crosshair");
-
-          // Final position update to ensure accuracy
-          const finalX = Math.round(xScale.invert(event.x));
-          const finalY = Math.round(yScale.invert(event.y));
-          dispatch(updatePoint({ id: d.id, x: finalX, y: finalY }));
-        }
-      );
-
-    // Add points with enhanced styling
-    const pointsGroup = chartGroup.append("g").attr("class", "points");
-
-    const pointsSelection = pointsGroup
-      .selectAll<SVGCircleElement, Point>(".point")
-      .data(points, (d: Point) => d.id);
-
-    // Remove old points
-    pointsSelection.exit().remove();
-
-    // Add new points
-    const newPoints = pointsSelection
-      .enter()
-      .append("circle")
-      .attr("class", "point")
-      .attr("r", 6)
-      .attr("cx", (d: Point) => xScale(d.x))
-      .attr("cy", (d: Point) => yScale(d.y))
-      .style("cursor", "grab")
-      .style("transition", "all 0.2s ease") // Smooth transitions
-      .call(drag);
-
-    // Update all points with enhanced styling
-    const allPoints = pointsSelection.merge(newPoints);
-
-    allPoints
-      .attr("cx", (d: Point) => xScale(d.x))
-      .attr("cy", (d: Point) => yScale(d.y))
-      .attr("fill", (d: Point) => {
-        if (d.id === draggedPointId) return "#ff6b6b"; // Red while dragging
-        if (d.id === hoveredId) return "#4ecdc4";
-        return "#8884d8"; // Default blue
-      })
-      .attr("stroke", "#fff")
-      .attr("stroke-width", (d: Point) => (d.id === draggedPointId ? 3 : 2))
-      .attr("r", (d: Point) => {
-        if (d.id === draggedPointId) return 10; // Larger while dragging
-        if (d.id === hoveredId) return 8; // Medium when hovered
-        return 6; // Default size
-      })
-      .style("filter", (d: Point) =>
-        d.id === draggedPointId
-          ? "drop-shadow(0 4px 8px rgba(0,0,0,0.3))"
-          : null
-      )
-      .style("cursor", (d: Point) =>
-        d.id === draggedPointId ? "grabbing !important" : "grab"
-      )
-      .on("mouseenter", function (event: MouseEvent, d: Point) {
-        if (!isDragging) {
-          dispatch(setHovered(d.id));
-          d3.select(this).attr("r", 8).style("cursor", "grab");
-        }
-      })
-      .on("mouseleave", function (event: MouseEvent, d: Point) {
-        if (!isDragging && d.id !== draggedPointId) {
-          dispatch(setHovered(null));
-          d3.select(this).attr("r", 6);
-        }
-      });
-
-    // Enhanced tooltip with persistent drag information
-    const tooltip = d3
-      .select("body")
-      .selectAll<HTMLDivElement, null>(".d3-tooltip")
-      .data([null])
-      .join("div")
-      .attr("class", "d3-tooltip")
-      .style("position", "fixed") // Use fixed positioning for better tracking
-      .style("background", "rgba(0, 0, 0, 0.95)")
-      .style("color", "white")
-      .style("padding", "12px")
-      .style("border-radius", "8px")
-      .style("font-size", "13px")
-      .style("font-family", "monospace")
-      .style("pointer-events", "none")
-      .style("opacity", 0)
-      .style("z-index", 10000) // Very high z-index
-      .style("box-shadow", "0 4px 12px rgba(0,0,0,0.4)")
-      .style("border", "2px solid rgba(255,255,255,0.3)")
-      .style("backdrop-filter", "blur(5px)");
-
-    // Persistent tooltip during dragging
-    if (isDragging && currentDragCoords) {
-      tooltip.style("opacity", 1).html(`
-           <strong>DRAGGING POINT</strong><br>
-           Current: (${currentDragCoords.x}, ${currentDragCoords.y})<br>
-           ID: ${draggedPointId}<br>
-           Release to place
-        `);
-
-      // Update tooltip position continuously during drag
-      const updateTooltipPosition = (event: MouseEvent) => {
-        if (isDragging) {
-          tooltip
-            .style("left", (event.pageX || 0) + 20 + "px")
-            .style("top", (event.pageY || 0) - 10 + "px");
-        }
+        return ticks;
       };
 
-      // Track mouse movement for tooltip positioning during drag
-      svg.on("mousemove.tooltip", updateTooltipPosition);
-    } else {
-      svg.on("mousemove.tooltip", null); // Remove tracker when not dragging
-    }
+      // Create axes with custom ticks
+      const xAxis = d3
+        .axisBottom(xScale)
+        .tickValues(createCustomTicks(xScale.domain() as [number, number]))
+        .tickFormat(d3.format("d"));
 
-    allPoints
-      .on("mouseover", function (event: MouseEvent, d: Point) {
-        if (!isDragging) {
-          tooltip.transition().duration(200).style("opacity", 1);
-          tooltip
-            .html(
-              `
+      const yAxis = d3
+        .axisLeft(yScale)
+        .tickValues(createCustomTicks(yScale.domain() as [number, number]))
+        .tickFormat(d3.format("d"));
+
+      // Add grid lines
+      chartGroup
+        .append("g")
+        .attr("class", "grid x-grid")
+        .attr("transform", `translate(0,${height})`)
+        .call(
+          d3
+            .axisBottom(xScale)
+            .tickValues(createCustomTicks(xScale.domain() as [number, number]))
+            .tickSize(-height)
+            .tickFormat(() => "")
+        )
+        .style("stroke-dasharray", "3,3")
+        .style("opacity", 0.3);
+
+      chartGroup
+        .append("g")
+        .attr("class", "grid y-grid")
+        .call(
+          d3
+            .axisLeft(yScale)
+            .tickValues(createCustomTicks(yScale.domain() as [number, number]))
+            .tickSize(-width)
+            .tickFormat(() => "")
+        )
+        .style("stroke-dasharray", "3,3")
+        .style("opacity", 0.3);
+
+      // Add axes
+      chartGroup
+        .append("g")
+        .attr("class", "x-axis")
+        .attr("transform", `translate(0,${height})`)
+        .call(xAxis);
+
+      chartGroup.append("g").attr("class", "y-axis").call(yAxis);
+
+      // Add clickable background for adding points
+      const background = chartGroup
+        .append("rect")
+        .attr("class", "chart-background")
+        .attr("width", width)
+        .attr("height", height)
+        .attr("fill", "transparent")
+        .style("cursor", "crosshair")
+        .style("pointer-events", "all");
+
+      // Enhanced zoom behavior
+      const zoom = d3
+        .zoom<SVGSVGElement, unknown>()
+        .scaleExtent([0.1, 50])
+        .filter((event) => {
+          // Disable zoom during point dragging
+          return !isDragging;
+        })
+        .on("zoom", (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
+          const { transform } = event;
+
+          // Store the current transform
+          setCurrentTransform(transform);
+
+          // Update scales with new transform
+          const newXScale = transform.rescaleX(baseXScale);
+          const newYScale = transform.rescaleY(baseYScale);
+
+          // Update axes
+          chartGroup.select<SVGGElement>(".x-axis").call(
+            d3
+              .axisBottom(newXScale)
+              .tickValues(
+                createCustomTicks(newXScale.domain() as [number, number])
+              )
+              .tickFormat(d3.format("d"))
+          );
+
+          chartGroup.select<SVGGElement>(".y-axis").call(
+            d3
+              .axisLeft(newYScale)
+              .tickValues(
+                createCustomTicks(newYScale.domain() as [number, number])
+              )
+              .tickFormat(d3.format("d"))
+          );
+
+          // Update grid
+          chartGroup.select<SVGGElement>(".x-grid").call(
+            d3
+              .axisBottom(newXScale)
+              .tickValues(
+                createCustomTicks(newXScale.domain() as [number, number])
+              )
+              .tickSize(-height)
+              .tickFormat(() => "")
+          );
+
+          chartGroup.select<SVGGElement>(".y-grid").call(
+            d3
+              .axisLeft(newYScale)
+              .tickValues(
+                createCustomTicks(newYScale.domain() as [number, number])
+              )
+              .tickSize(-width)
+              .tickFormat(() => "")
+          );
+
+          // Update points (only if not dragging)
+          if (!isDragging) {
+            chartGroup
+              .selectAll<SVGCircleElement, Point>(".point")
+              .attr("cx", (d: Point) => newXScale(d.x))
+              .attr("cy", (d: Point) => newYScale(d.y));
+          }
+        });
+
+      // Apply zoom to SVG with current transform
+      svg.call(zoom).call(zoom.transform, currentTransform);
+
+      // Handle background clicks to add points
+      background.on("click", function (event: MouseEvent) {
+        if (event.defaultPrevented || isDragging) return;
+
+        const [mouseX, mouseY] = d3.pointer(event, this);
+
+        // Validate scales before inversion to prevent NaN values
+        const x =
+          xScale.domain()[0] !== xScale.domain()[1]
+            ? Math.round(xScale.invert(mouseX))
+            : Math.round(mouseX);
+
+        const y =
+          yScale.domain()[0] !== yScale.domain()[1]
+            ? Math.round(yScale.invert(mouseY))
+            : Math.round(mouseY);
+
+        const newId = `point-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+        // Use debounced add point to prevent rapid re-renders
+        addPointDebounced({ x, y, id: newId });
+      });
+
+      const drag = d3
+        .drag<SVGCircleElement, Point>()
+        .subject(function (event: any, d: Point) {
+          // Return the current screen position of the element for proper offset calculation
+          return {
+            x: xScale(d.x),
+            y: yScale(d.y),
+          };
+        })
+        .on(
+          "start",
+          function (
+            event: d3.D3DragEvent<SVGCircleElement, Point, Point>,
+            d: Point
+          ) {
+            event.sourceEvent.stopPropagation();
+            setIsDragging(true);
+            setDraggedPointId(d.id);
+
+            // Clear hover state when dragging starts
+            dispatch(setHovered(null));
+
+            const pointer = d3.pointer(event.sourceEvent, chartGroup.node());
+            const currentX = xScale(d.x);
+            const currentY = yScale(d.y);
+
+            d.offsetX = pointer[0] - currentX;
+            d.offsetY = pointer[1] - currentY;
+
+            d3.select(this)
+              .raise()
+              .attr("r", 10)
+              .attr("stroke-width", 3)
+              .attr("fill", "#ff6b6b")
+              .style(
+                "filter",
+                "drop-shadow(0 4px 8px rgba(129, 125, 125, 0.3))"
+              )
+              .style("cursor", "grabbing");
+
+            setCurrentDragCoords({ x: d.x, y: d.y });
+          }
+        )
+        .on(
+          "drag",
+          function (
+            event: d3.D3DragEvent<SVGCircleElement, Point, Point>,
+            d: Point
+          ) {
+            let elementX = event.x - (d.offsetX || 0);
+            let elementY = event.y - (d.offsetY || 0);
+
+            // Constrain to chart bounds
+            elementX = Math.max(0, Math.min(width, elementX));
+            elementY = Math.max(0, Math.min(height, elementY));
+
+            // Update visual position immediately
+            d3.select(this).attr("cx", elementX).attr("cy", elementY);
+
+            // Calculate data coordinates with scale validation
+            const newX =
+              xScale.domain()[0] !== xScale.domain()[1]
+                ? Math.round(xScale.invert(elementX))
+                : Math.round(elementX);
+
+            const newY =
+              yScale.domain()[0] !== yScale.domain()[1]
+                ? Math.round(yScale.invert(elementY))
+                : Math.round(elementY);
+
+            // Update current drag coordinates for tooltip
+            setCurrentDragCoords({ x: newX, y: newY });
+
+            // Throttle Redux updates to reduce frequency
+            if (!(this as any)._throttleTimeout) {
+              (this as any)._throttleTimeout = setTimeout(() => {
+                dispatch(updatePoint({ id: d.id, x: newX, y: newY }));
+                (this as any)._throttleTimeout = null;
+              }, 16); // ~60fps
+            }
+          }
+        )
+        .on(
+          "end",
+          function (
+            event: d3.D3DragEvent<SVGCircleElement, Point, Point>,
+            d: Point
+          ) {
+            // Clear throttle
+            if ((this as any)._throttleTimeout) {
+              clearTimeout((this as any)._throttleTimeout);
+              (this as any)._throttleTimeout = null;
+            }
+
+            setIsDragging(false);
+            setDraggedPointId(null);
+            setCurrentDragCoords(null);
+
+            // **Clean up offset properties**
+            delete d.offsetX;
+            delete d.offsetY;
+
+            // Reset visual feedback
+            d3.select(this)
+              .attr("r", d.id === hoveredId ? 8 : 6)
+              .attr("stroke-width", 2)
+              .attr("fill", d.id === hoveredId ? "#4ecdc4" : "#8884d8")
+              .style("filter", null)
+              .style("cursor", "grab");
+
+            // Final position update with scale validation
+            const finalX =
+              xScale.domain()[0] !== xScale.domain()[1]
+                ? Math.round(xScale.invert(event.x - (d.offsetX || 0)))
+                : Math.round(event.x);
+
+            const finalY =
+              yScale.domain()[0] !== yScale.domain()[1]
+                ? Math.round(yScale.invert(event.y - (d.offsetY || 0)))
+                : Math.round(event.y);
+
+            dispatch(updatePoint({ id: d.id, x: finalX, y: finalY }));
+          }
+        );
+
+      // Add points with enhanced styling
+      const pointsGroup = chartGroup.append("g").attr("class", "points");
+
+      const pointsSelection = pointsGroup
+        .selectAll<SVGCircleElement, Point>(".point")
+        .data(points, (d: Point) => d.id);
+
+      // Remove old points
+      pointsSelection.exit().remove();
+
+      // Add new points
+      const newPoints = pointsSelection
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 6)
+        .attr("cx", (d: Point) => xScale(d.x))
+        .attr("cy", (d: Point) => yScale(d.y))
+        .style("cursor", "grab")
+        .style("transition", "all 0.2s ease")
+        .call(drag);
+
+      // Update all points with enhanced styling
+      const allPoints = pointsSelection.merge(newPoints);
+
+      allPoints
+        .attr("cx", (d: Point) => xScale(d.x))
+        .attr("cy", (d: Point) => yScale(d.y))
+        .attr("data-id", (d: Point) => d.id)
+        .attr("fill", (d: Point) => {
+          if (d.id === draggedPointId) return "#ff6b6b";
+          if (d.id === hoveredId) return "#4ecdc4";
+          return "#8884d8";
+        })
+        .attr("stroke", "#fff")
+        .attr("stroke-width", (d: Point) => (d.id === draggedPointId ? 3 : 2))
+        .attr("r", (d: Point) => {
+          if (d.id === draggedPointId) return 10;
+          if (d.id === hoveredId) return 8;
+          return 6;
+        })
+        .style("filter", (d: Point) =>
+          d.id === draggedPointId
+            ? "drop-shadow(0 4px 8px rgba(0,0,0,0.3))"
+            : null
+        )
+        .style("cursor", "grab")
+        .on("mouseenter", function (event: MouseEvent, d: Point) {
+          if (!isDragging) {
+            dispatch(setHovered(d.id));
+            d3.select(this).attr("r", 8);
+          }
+        })
+        .on("mouseleave", function (event: MouseEvent, d: Point) {
+          if (!isDragging && d.id !== draggedPointId) {
+            dispatch(setHovered(null));
+            d3.select(this).attr("r", 6);
+          }
+        });
+
+      // Enhanced tooltip with persistent drag information
+      const tooltip = d3
+        .select("body")
+        .selectAll<HTMLDivElement, null>(".d3-tooltip")
+        .data([null])
+        .join("div")
+        .attr("class", "d3-tooltip")
+        .style("position", "fixed")
+        .style("background", "rgba(0, 0, 0, 0.95)")
+        .style("color", "white")
+        .style("padding", "12px")
+        .style("border-radius", "8px")
+        .style("font-size", "13px")
+        .style("font-family", "monospace")
+        .style("pointer-events", "none")
+        .style("opacity", 0)
+        .style("z-index", 10000)
+        .style("box-shadow", "0 4px 12px rgba(0,0,0,0.4)")
+        .style("border", "2px solid rgba(255,255,255,0.3)")
+        .style("backdrop-filter", "blur(5px)");
+
+      // Persistent tooltip during dragging
+      if (isDragging && currentDragCoords) {
+        tooltip.style("opacity", 1).html(`
+          <strong>DRAGGING POINT</strong><br>
+          Current: (${currentDragCoords.x}, ${currentDragCoords.y})<br>
+          ID: ${draggedPointId}<br>
+          Release to place
+        `);
+
+        const updateTooltipPosition = (event: MouseEvent) => {
+          if (isDragging) {
+            tooltip
+              .style("left", (event.pageX || 0) + 20 + "px")
+              .style("top", (event.pageY || 0) - 10 + "px");
+          }
+        };
+
+        svg.on("mousemove.tooltip", updateTooltipPosition);
+      } else {
+        svg.on("mousemove.tooltip", null);
+      }
+
+      allPoints
+        .on("mouseover", function (event: MouseEvent, d: Point) {
+          if (!isDragging) {
+            tooltip.transition().duration(200).style("opacity", 1);
+            tooltip
+              .html(
+                `
              Point: (${d.x}, ${d.y})<br>
              ID: ${d.id}<br>
              Click and drag to move<br>
              Hover to highlight
-          `
-            )
-            .style("left", event.pageX + 15 + "px")
-            .style("top", event.pageY - 10 + "px");
-        }
-      })
-      .on("mouseout", function (event: MouseEvent, d: Point) {
-        if (!isDragging) {
-          tooltip.transition().duration(200).style("opacity", 0);
-        }
-      });
+              `
+              )
+              .style("left", event.pageX + 15 + "px")
+              .style("top", event.pageY - 10 + "px");
+          }
+        })
+        .on("mouseout", function (event: MouseEvent, d: Point) {
+          if (!isDragging) {
+            tooltip.transition().duration(200).style("opacity", 0);
+          }
+        });
 
-    // Mouse movement tracker for drag tooltip positioning
-    if (isDragging) {
-      svg.on("mousemove.dragtooltip", function (event: MouseEvent) {
-        if (currentDragCoords) {
-          tooltip
-            .style("left", event.pageX + 20 + "px")
-            .style("top", event.pageY - 10 + "px");
-        }
-      });
-    }
+      // Mouse movement tracker for drag tooltip positioning
+      if (isDragging) {
+        svg.on("mousemove.dragtooltip", function (event: MouseEvent) {
+          if (currentDragCoords) {
+            tooltip
+              .style("left", event.pageX + 20 + "px")
+              .style("top", event.pageY - 10 + "px");
+          }
+        });
+      }
 
-    // Enhanced zoom controls
-    if (!containerRef.current) return;
+      // Enhanced zoom controls
+      if (!containerRef.current) return;
 
-    const controls = d3
-      .select(containerRef.current)
-      .selectAll<HTMLDivElement, null>(".zoom-controls")
-      .data([null])
-      .join("div")
-      .attr("class", "zoom-controls")
-      .style("position", "absolute")
-      .style("top", "10px")
-      .style("right", "10px")
-      .style("display", "flex")
-      .style("flex-direction", "column")
-      .style("gap", "5px")
-      .style("opacity", isDragging ? "0.3" : "1") // Dim during drag
-      .style("pointer-events", isDragging ? "none" : "auto"); // Disable during drag
+      const controls = d3
+        .select(containerRef.current)
+        .selectAll<HTMLDivElement, null>(".zoom-controls")
+        .data([null])
+        .join("div")
+        .attr("class", "zoom-controls")
+        .style("position", "absolute")
+        .style("top", "10px")
+        .style("right", "10px")
+        .style("display", "flex")
+        .style("flex-direction", "column")
+        .style("gap", "5px")
+        .style("opacity", isDragging ? "0.6" : "1")
+        .style("pointer-events", isDragging ? "none" : "auto");
 
-    // Control buttons with better styling
-    const buttonStyle = {
-      padding: "8px 12px",
-      border: "none",
-      borderRadius: "4px",
-      cursor: "pointer",
-      fontSize: "12px",
-      fontWeight: "bold",
-      transition: "all 0.2s ease",
-      boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
-    };
+      const buttonStyle = {
+        padding: "8px 12px",
+        border: "none",
+        borderRadius: "4px",
+        cursor: "pointer",
+        fontSize: "12px",
+        fontWeight: "bold",
+        transition: "all 0.2s ease",
+        boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
+      };
 
-    controls
-      .selectAll<HTMLButtonElement, null>(".zoom-in")
-      .data([null])
-      .join("button")
-      .attr("class", "zoom-in")
-      .text("+ Zoom In")
-      .style("background", "#007bff")
-      .style("color", "white")
-      .each(function () {
-        Object.assign(this.style, buttonStyle);
-      })
-      .on("click", () => {
-        svg.transition().duration(300).call(zoom.scaleBy, 1.5);
-      });
+      controls
+        .selectAll<HTMLButtonElement, null>(".fit-points")
+        .data([null])
+        .join("button")
+        .attr("class", "fit-points")
+        .text("Fit All Points")
+        .style("background", "#17a2b8")
+        .style("color", "white")
+        .each(function () {
+          Object.assign(this.style, buttonStyle);
+        })
+        .on("click", () => {
+          if (points.length > 0) {
+            setCurrentTransform(d3.zoomIdentity);
+            svg
+              .transition()
+              .duration(500)
+              .call(zoom.transform, d3.zoomIdentity);
+          }
+        });
 
-    controls
-      .selectAll<HTMLButtonElement, null>(".zoom-out")
-      .data([null])
-      .join("button")
-      .attr("class", "zoom-out")
-      .text("- Zoom Out")
-      .style("background", "#007bff")
-      .style("color", "white")
-      .each(function () {
-        Object.assign(this.style, buttonStyle);
-      })
-      .on("click", () => {
-        svg.transition().duration(300).call(zoom.scaleBy, 0.67);
-      });
-
-    controls
-      .selectAll<HTMLButtonElement, null>(".fit-points")
-      .data([null])
-      .join("button")
-      .attr("class", "fit-points")
-      .text("Fit All Points")
-      .style("background", "#17a2b8")
-      .style("color", "white")
-      .each(function () {
-        Object.assign(this.style, buttonStyle);
-      })
-      .on("click", () => {
-        if (points.length > 0) {
+      controls
+        .selectAll<HTMLButtonElement, null>(".zoom-reset")
+        .data([null])
+        .join("button")
+        .attr("class", "zoom-reset")
+        .text("Reset View")
+        .style("background", "#28a745")
+        .style("color", "white")
+        .each(function () {
+          Object.assign(this.style, buttonStyle);
+        })
+        .on("click", () => {
           setCurrentTransform(d3.zoomIdentity);
           svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
-        }
-      });
-
-    controls
-      .selectAll<HTMLButtonElement, null>(".zoom-reset")
-      .data([null])
-      .join("button")
-      .attr("class", "zoom-reset")
-      .text("Reset View")
-      .style("background", "#28a745")
-      .style("color", "white")
-      .each(function () {
-        Object.assign(this.style, buttonStyle);
-      })
-      .on("click", () => {
-        setCurrentTransform(d3.zoomIdentity);
-        svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
-      });
+        });
+    } catch (error) {
+      console.error("Chart creation failed:", error);
+    }
   }, [
     points,
     hoveredId,
@@ -601,9 +629,7 @@ export default function PointsGraph() {
     height,
     dimensions,
     currentTransform,
-    isDragging,
-    draggedPointId,
-    currentDragCoords,
+    addPointDebounced,
   ]);
 
   // Create/update chart when dependencies change
@@ -611,10 +637,23 @@ export default function PointsGraph() {
     createChart();
   }, [createChart]);
 
-  // Cleanup global cursor on component unmount
   useEffect(() => {
+    if (!svgRef.current) return;
+
+    const background = d3.select(svgRef.current).select(".chart-background");
+    if (!background.empty()) {
+      background.style("cursor", isDragging ? "grabbing" : "crosshair");
+    }
+  }, [isDragging]);
+
+  // Clean up event handlers and prevent memory leaks
+  useEffect(() => {
+    const svg = svgRef.current;
     return () => {
-      d3.select("body").style("cursor", "default");
+      if (svg) {
+        d3.select(svg).on("mousemove.tooltip", null);
+        d3.select(svg).on("mousemove.dragtooltip", null);
+      }
     };
   }, []);
 
@@ -628,7 +667,7 @@ export default function PointsGraph() {
         minHeight: "400px",
         display: "flex",
         flexDirection: "column",
-        cursor: isDragging ? "grabbing" : "default", // Container cursor
+        cursor: "default",
       }}
     >
       <h3
@@ -647,7 +686,7 @@ export default function PointsGraph() {
             width: "100%",
             height: "100%",
             display: "block",
-            cursor: isDragging ? "grabbing" : "default",
+            cursor: "default",
           }}
         ></svg>
       </div>

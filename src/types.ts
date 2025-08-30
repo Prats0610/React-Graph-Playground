@@ -4,4 +4,6 @@ export type Point = {
   x: number;
   y: number;
   id: string;
+  offsetX?: number;
+  offsetY?: number;
 };
