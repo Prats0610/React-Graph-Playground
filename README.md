@@ -93,3 +93,31 @@ Step 6: Implementation Plan
 4. Implement the Graph -> Drag handler, Click handler, hover
 5. Connecting hover state -> highlight both table and graph
 6. Add a tooltip.
+
+Key Challenges Faced:
+
+1. D3.js Integration with React
+
+- Complex state synchronization between D3 and React
+- Memory leaks from D3 event handlers
+- ResizeObserver compatibility issues
+- Mouse Cursor interaction after dragging events in D3.js (facing lag after dragging the point)
+
+Areas of Improvement
+
+1. Adding testcase for all the components
+2. Modular approach for components, can extract business logic into custom hooks, split large components
+3. Data lost on page refresh.
+4. D3 re-renders entire chart on every state change: Implement selective rendering
+5. Add Error Boundaries.
+
+Testing
+
+1. The project includes comprehensive testing setup with:
+
+- Unit Tests: Component logic and Redux state management
+- Integration Tests: Component interaction with Redux store
+
+Login cred:
+email: pratishtha12@test.com
+password: pratishtha
