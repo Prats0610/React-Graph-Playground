@@ -16,6 +16,7 @@ type Props = {
   onRowHover: (id: string | null) => void;
   onEdit: (p: Point) => void;
   onDelete: (id: string) => void;
+  newestPointId?: string | null;
 };
 
 /**
@@ -27,6 +28,7 @@ export default function PointsTableUI({
   onRowHover,
   onEdit,
   onDelete,
+  newestPointId,
 }: Props) {
   return (
     <Table size="small" aria-label="points table">
@@ -45,6 +47,12 @@ export default function PointsTableUI({
             onMouseEnter={() => onRowHover(p.id)}
             onMouseLeave={() => onRowHover(null)}
             selected={hoveredId === p.id}
+            sx={{
+              backgroundColor: p.id === newestPointId ? "#e8f5e8" : "inherit",
+              "&:hover": {
+                backgroundColor: p.id === newestPointId ? "#d4edda" : undefined,
+              },
+            }}
           >
             <TableCell>{p.id.slice(0, 6)}</TableCell>
             <TableCell align="right">{p.x}</TableCell>
